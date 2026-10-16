@@ -113,3 +113,26 @@ def delete_employee(employee_id):
         raise
     finally:
         _close_resources(connection, cursor)
+
+
+def import_employees(employees):
+    connection = get_connection()
+    cursor = None
+    try:
+        cursor = connection.cursor()
+        cursor.executemany(
+            "INSERT INTO employees (name, email, department, salary) "
+            "VALUES (%s, %s, %s, %s)",
+            [
+                (employee["name"], employee["email"], employee["department"], employee["salary"])
+                for employee in employees
+            ],
+        )
+        imported_count = cursor.rowcount
+        connection.commit()
+        return imported_count
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        _close_resources(connection, cursor)

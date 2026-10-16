@@ -1,12 +1,14 @@
 import re
 from decimal import Decimal, InvalidOperation
+from typing import Any
 
 import mysql.connector
 from fastapi import Body, FastAPI, HTTPException, Path, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from mysql.connector import errorcode
 
 import employee_queries
+import file_operations
 
 
 app = FastAPI(title="Employee Management API")
@@ -86,6 +88,21 @@ def raise_duplicate_email_error(error):
     raise error
 
 
+def run_text_file_operation(operation, *arguments):
+    try:
+        return operation(*arguments)
+    except FileExistsError:
+        raise HTTPException(status_code=409, detail="A file with that name already exists.") from None
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Text file not found.") from None
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Permission denied for this file operation.") from None
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from None
+    except OSError:
+        raise HTTPException(status_code=500, detail="The file operation could not be completed.") from None
+
+
 @app.post("/employees", status_code=201)
 def create_employee(employee: dict = Body(...)):
     employee_data = validate_employee_data(employee)
@@ -127,3 +144,129 @@ def delete_employee(employee_id: int = Path(gt=0)):
     if not deleted:
         raise HTTPException(status_code=404, detail="Employee not found.")
     return Response(status_code=204)
+
+
+@app.post("/text-files/{filename}", status_code=201)
+def create_text_file(filename: str):
+    run_text_file_operation(file_operations.create_text_file, filename)
+    return {"filename": filename, "message": "Text file created."}
+
+
+@app.put("/text-files/{filename}")
+def write_text_file(filename: str, content: str = Body(embed=True)):
+    run_text_file_operation(file_operations.write_text_file, filename, content)
+    return {"filename": filename, "message": "Text file written."}
+
+
+@app.post("/text-files/{filename}/append")
+def append_text_file(filename: str, content: str = Body(embed=True)):
+    run_text_file_operation(file_operations.append_text_file, filename, content)
+    return {"filename": filename, "message": "Content appended."}
+
+
+@app.get("/text-files/{filename}")
+def read_text_file(filename: str):
+    content = run_text_file_operation(file_operations.read_text_file, filename)
+    return {"filename": filename, "content": content}
+
+
+@app.get("/text-files/{filename}/lines")
+def read_text_file_lines(filename: str):
+    lines = run_text_file_operation(file_operations.read_text_file_lines, filename)
+    return {"filename": filename, "lines": lines}
+
+
+@app.get("/text-files/{filename}/exists")
+def text_file_exists(filename: str):
+    exists = run_text_file_operation(file_operations.text_file_exists, filename)
+    return {"filename": filename, "exists": exists}
+
+
+@app.post("/text-files/{filename}/rename")
+def rename_text_file(filename: str, new_filename: str = Body(embed=True)):
+    run_text_file_operation(file_operations.rename_text_file, filename, new_filename)
+    return {"filename": new_filename, "message": "Text file renamed."}
+
+
+@app.post("/text-files/{filename}/copy")
+def copy_text_file(filename: str, new_filename: str = Body(embed=True)):
+    run_text_file_operation(file_operations.copy_text_file, filename, new_filename)
+    return {"filename": new_filename, "message": "Text file copied."}
+
+
+@app.delete("/text-files/{filename}", status_code=204)
+def delete_text_file(filename: str):
+    run_text_file_operation(file_operations.delete_text_file, filename)
+    return Response(status_code=204)
+
+
+@app.get("/text-files/{filename}/size")
+def get_text_file_size(filename: str):
+    size = run_text_file_operation(file_operations.get_text_file_size, filename)
+    return {"filename": filename, "size_bytes": size}
+
+
+@app.post("/employees/import-csv/{filename}", status_code=201)
+def import_employees_from_csv(filename: str):
+    rows = run_text_file_operation(file_operations.read_employee_csv, filename)
+    valid_employees = []
+    invalid_rows = []
+
+    for row_number, row in rows:
+        try:
+            valid_employees.append(validate_employee_data(row))
+        except HTTPException as error:
+            invalid_rows.append(f"Row {row_number}: {error.detail}")
+
+    if invalid_rows:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "CSV validation failed; no employees were imported.",
+                "errors": invalid_rows,
+            },
+        )
+
+    try:
+        imported_count = employee_queries.import_employees(valid_employees)
+    except mysql.connector.IntegrityError as error:
+        raise_duplicate_email_error(error)
+    return {"imported_count": imported_count}
+
+
+@app.get("/employees/export-csv/{filename}")
+def export_employees_to_csv(filename: str):
+    employees = employee_queries.get_all_employees()
+    csv_path = run_text_file_operation(
+        file_operations.write_employee_csv,
+        filename,
+        employees,
+    )
+    return FileResponse(csv_path, media_type="text/csv", filename=filename)
+
+
+@app.put("/json-files/{filename}")
+def write_json_file(filename: str, data: Any = Body(...)):
+    json_path = run_text_file_operation(file_operations.write_json_file, filename, data)
+    return {"filename": json_path.name, "message": "JSON file written."}
+
+
+@app.get("/json-files/{filename}")
+def read_json_file(filename: str):
+    data = run_text_file_operation(file_operations.read_json_file, filename)
+    return {"filename": filename, "data": data}
+
+
+@app.get("/employees/export-json/{filename}")
+def export_employees_to_json(filename: str):
+    employees = employee_queries.get_all_employees()
+    json_employees = [
+        {**employee, "salary": str(employee["salary"])}
+        for employee in employees
+    ]
+    json_path = run_text_file_operation(
+        file_operations.write_json_file,
+        filename,
+        json_employees,
+    )
+    return FileResponse(json_path, media_type="application/json", filename=filename)
